@@ -1,0 +1,10 @@
+alter table ash_user add column if not exists rp integer not null default 120;
+alter table ash_user add column if not exists unlocked text not null default '';
+alter table ash_user add column if not exists coins integer not null default 40;
+alter table ash_user add column if not exists mods text not null default '';
+alter table ash_user add column if not exists streak integer not null default 0;
+alter table ash_user add column if not exists streak_on text not null default '';
+alter table ash_user add column if not exists focus text not null default '';
+alter table ash_user add column if not exists focus_rp integer not null default 0;
+alter table ash_user add column if not exists rev integer not null default 0;
+alter table ash_room add column if not exists talk text not null default '[]';

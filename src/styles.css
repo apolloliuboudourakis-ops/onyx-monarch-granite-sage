@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Fraunces", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --font-sans: "Outfit", "Avenir Next", "Segoe UI", sans-serif;
+  --color-bg: #14120e;
+  --color-surface: #1e1b16;
+  --color-surface-2: #2a261f;
+  --color-fg: #f3eadb;
+  --color-muted: #b3a794;
+  --color-brass: #d3924a;
+  --color-brass-ink: #2a1c0c;
+  --color-line: #3a342b;
+  --color-vesper: #e07a3d;
+  --color-vesper-ink: #2c1408;
+  --color-nereid: #2fafa6;
+  --color-nereid-ink: #062422;
+  --color-pass: #f4f1ea;
+  --color-pass-ink: #1a1814;
+  --color-pass-mute: #5c574e;
+  --radius-lg: 0.9rem;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+  }
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    text-wrap: balance;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  p {
+    text-wrap: pretty;
+  }
+}
+
+.map-shell {
+  touch-action: none;
+}
+
+.safe-bottom {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
+
+.frame-vesper {
+  box-shadow: inset 0 0 0 6px var(--color-vesper);
+}
+
+.frame-nereid {
+  box-shadow: inset 0 0 0 6px var(--color-nereid);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto !important;
+  }
+}
