@@ -30,8 +30,9 @@ import { MAPS, MAP_BY } from "@/game/maps";
 import type { BuyId, Cmd, Match, PlayerId, RootState } from "@/game/types";
 import { Manual } from "@/components/ashveil/Manual";
 import { FriendsPage, LobbyPage, LoginPage, Nameplate, RankPage, ResearchPage, SearchPage, TurnClock, WaitingPage, AdminPage } from "@/components/ashveil/Online";
+import { StaffPanel } from "@/components/ashveil/StaffPanel";
 import { accountKeep, accountLogout, accountMe, accountScore, friendAnswer, friendList, roomCancel, roomHost, roomJoin, roomLeave, roomPlay, roomQueue, roomSay, roomSync } from "@/game/online.functions";
-import { mergeIds, type FriendRow, type PublicUser } from "@/game/online";
+import { dropStore, mergeIds, readStore, writeStore, type FriendRow, type PublicUser } from "@/game/online";
 import type { RoomOk } from "@/game/online.functions";
 
 declare global {
@@ -53,7 +54,7 @@ function statRows(rows: [string, string][]) {
   );
 }
 
-function unitSheet(def: UnitDef, hp?: number, left?: number, max?: number) {
+function unitSheet(def: UnitDef, hp?: number, left?: number, max?: number, plus?: { atk: number; move: number; hp: number }) {
   const range = def.minRange === def.maxRange ? String(def.maxRange) : `${def.minRange}–${def.maxRange}`;
   const build = def.build ? `${def.build} ${def.build === 1 ? "turn" : "turns"}` : "Now";
   const cap = max ?? def.hp;
@@ -65,11 +66,11 @@ function unitSheet(def: UnitDef, hp?: number, left?: number, max?: number) {
       ["Cost", String(def.cost)],
       ["Build", build],
       ["Build left", left == null ? build : left > 0 ? `${left} ${left === 1 ? "turn" : "turns"}` : "Ready"],
-      ["Move", String(def.move)],
+      ["Move", String(def.move + (plus?.move || 0))],
       ["Range", range],
       ["Vision", String(def.vision)],
       ["Radar", String(def.radar ?? 0)],
-      ["Attack", String(def.atk)],
+      ["Attack", String(def.atk + (plus?.atk || 0))],
       ["Shots", String(def.shots ?? 1)],
       ["Hit", def.atk > 0 && def.maxRange > 0 ? hitBand(def.id, def.minRange, def.maxRange) : "—"],
       ["Armor", def.armor === "light" ? "Infantry" : def.armor === "armor" ? "Armor" : "Air"],
@@ -479,11 +480,15 @@ function Field({
 
 const LOGIN_EPOCH = "6";
 let forceSignOut = false;
-if (typeof window !== "undefined" && localStorage.getItem("ashveil.loginEpoch") !== LOGIN_EPOCH) {
-  localStorage.setItem("ashveil.loginEpoch", LOGIN_EPOCH);
-  localStorage.removeItem("ashveil.token");
-  sessionStorage.removeItem("ashveil.room");
-  forceSignOut = true;
+try {
+  if (typeof window !== "undefined" && readStore("local", "ashveil.loginEpoch") !== LOGIN_EPOCH) {
+    writeStore("local", "ashveil.loginEpoch", LOGIN_EPOCH);
+    dropStore("local", "ashveil.token");
+    dropStore("session", "ashveil.room");
+    forceSignOut = true;
+  }
+} catch {
+  forceSignOut = false;
 }
 
 function keepAccount(prev: (PublicUser & { token: string }) | null, user: PublicUser, token: string) {
@@ -510,9 +515,10 @@ export function AshveilApp() {
   const [page, setPage] = useState<"field" | "login" | "friends" | "rank" | "research" | "settings" | "admin">("field");
   const [joinCode, setJoinCode] = useState("");
   const [note, setNote] = useState("");
+  const [staffOpen, setStaffOpen] = useState(false);
   const [favs, setFavs] = useState<string[]>(() => {
     try {
-      const raw = JSON.parse(localStorage.getItem("ashveil.favs") || "[]") as unknown;
+      const raw = JSON.parse(readStore("local", "ashveil.favs") || "[]") as unknown;
       return Array.isArray(raw) ? raw.filter((id) => typeof id === "string") : [];
     } catch {
       return [];
@@ -525,8 +531,18 @@ export function AshveilApp() {
   });
   const netRef = useRef<{ token: string; code: string; seat: 0 | 1; version: number } | null>(null);
   useEffect(() => {
-    localStorage.setItem("ashveil.favs", JSON.stringify(favs));
+    writeStore("local", "ashveil.favs", JSON.stringify(favs));
   }, [favs]);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const tag = (event.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (event.key === "Escape") setStaffOpen(false);
+      if (event.key === "`" && account?.role) setStaffOpen((open) => !open);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [account?.role]);
   const roomEpoch = useRef(0);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -544,8 +560,8 @@ export function AshveilApp() {
 
   const forgetAccount = useCallback(() => {
     roomEpoch.current += 1;
-    localStorage.removeItem("ashveil.token");
-    sessionStorage.removeItem("ashveil.room");
+    dropStore("local", "ashveil.token");
+    dropStore("session", "ashveil.room");
     netRef.current = null;
     setAccount(null);
     setRoom(null);
@@ -615,29 +631,29 @@ export function AshveilApp() {
     const saved = loadRoot();
     setState((s) => ({ ...s, hasSave: !!saved?.match }));
     setMute(loadMuted());
-    const token = localStorage.getItem("ashveil.token");
+    const token = readStore("local", "ashveil.token");
     if (token) {
       void accountMe({ data: { token } })
         .then((res) => {
-          if (localStorage.getItem("ashveil.token") !== token) return;
+          if (readStore("local", "ashveil.token") !== token) return;
           if (res.ok) {
-            const stored = localStorage.getItem(`ashveil.unlocked.${res.user.id}`) || "";
+            const stored = readStore("local", `ashveil.unlocked.${res.user.id}`) || "";
             setAccount({ ...res.user, token, unlocked: mergeIds(res.user.unlocked, stored) });
-            const code = sessionStorage.getItem("ashveil.room");
+            const code = readStore("session", "ashveil.room");
             if (code) {
               void roomSync({ data: { token, code } }).then((roomRes) => {
-                if (localStorage.getItem("ashveil.token") !== token) return;
+                if (readStore("local", "ashveil.token") !== token) return;
                 if (!roomRes.ok) {
-                  sessionStorage.removeItem("ashveil.room");
+                  dropStore("session", "ashveil.room");
                   return;
                 }
                 setRoom(roomRes);
                 if (roomRes.state) setState(roomRes.state);
-              }).catch(() => sessionStorage.removeItem("ashveil.room"));
+              }).catch(() => dropStore("session", "ashveil.room"));
             }
           } else if (res.error === "Sign in again.") {
-            localStorage.removeItem("ashveil.token");
-            sessionStorage.removeItem("ashveil.room");
+            dropStore("local", "ashveil.token");
+            dropStore("session", "ashveil.room");
           }
         })
         .catch(() => {
@@ -664,7 +680,7 @@ export function AshveilApp() {
         if (stop) return;
         if (res.ok) {
           setPing({ incoming: res.incoming, invites: res.invites });
-          setRoster(res.players.map((row) => row.username));
+          setRoster(res.names?.length ? res.names : res.players.map((row) => row.username));
         } else if (res.error === "Sign in again.") forgetAccount();
       } catch {
         /* the next tick tries again */
@@ -684,14 +700,14 @@ export function AshveilApp() {
   useEffect(() => {
     if (!account?.token || !account.id) return;
     const key = `ashveil.unlocked.${account.id}`;
-    const stored = localStorage.getItem(key) || "";
+    const stored = readStore("local", key) || "";
     const merged = mergeIds(account.unlocked, stored);
     if (merged !== (account.unlocked || "")) {
-      localStorage.setItem(key, merged);
+      writeStore("local", key, merged);
       setAccount((prev) => (prev && prev.id === account.id ? { ...prev, unlocked: merged } : prev));
       return;
     }
-    localStorage.setItem(key, merged);
+    writeStore("local", key, merged);
     const mark = `${account.id}:${merged}`;
     if (!merged || keptUnlock.current === mark) return;
     void accountKeep({ data: { token: account.token, unlocked: merged } }).then((res) => {
@@ -771,7 +787,7 @@ export function AshveilApp() {
   }, [account?.token, forgetAccount]);
 
   useEffect(() => {
-    if (room) sessionStorage.setItem("ashveil.room", room.code);
+    if (room) writeStore("session", "ashveil.room", room.code);
   }, [room]);
 
   useEffect(() => {
@@ -931,7 +947,7 @@ export function AshveilApp() {
       void roomCancel({ data: { token: account.token, code: room.code } });
     }
     netRef.current = null;
-    sessionStorage.removeItem("ashveil.room");
+    dropStore("session", "ashveil.room");
     setRoom(null);
     setPage("field");
     setState((prev) => ({ ...prev, screen: "title", help: false, match: null }));
@@ -1075,12 +1091,16 @@ export function AshveilApp() {
       </div>
     ) : null;
 
+  const staffDock = account?.role ? (
+    <StaffPanel open={staffOpen} token={account.token} role={account.role} roomCode={room?.code ?? ""} onClose={() => setStaffOpen(false)} />
+  ) : null;
+
   if (page === "login") {
     return (
       <LoginPage
         onBack={() => setPage("field")}
         onDone={(token, user) => {
-          localStorage.setItem("ashveil.token", token);
+          writeStore("local", "ashveil.token", token);
           setAccount({ ...user, token });
           setPage("field");
         }}
@@ -1089,10 +1109,12 @@ export function AshveilApp() {
   }
   if (page === "friends" && account) {
     return (
+      <>
       <FriendsPage
         token={account.token}
         username={account.username}
         mapId={mapId}
+        mode={mode}
         hqHp={onlineHp}
         staff={account.operator || account.dev || account.username.toLowerCase() === "apollo"}
         purse={account.coins}
@@ -1102,6 +1124,8 @@ export function AshveilApp() {
         onBack={() => setPage("field")}
         onRoom={(next) => enterRoom(next)}
       />
+      {staffDock}
+      </>
     );
   }
   if (page === "rank" && account) return <RankPage token={account.token} onBack={() => setPage("field")} />;
@@ -1120,6 +1144,7 @@ export function AshveilApp() {
   }
   if (page === "settings") {
     return (
+      <>
       <main className="h-dvh overflow-y-auto bg-bg text-fg">
         <div className="mx-auto flex max-w-xl flex-col gap-4 px-4 py-8">
           <div className="flex items-center justify-between gap-3">
@@ -1148,10 +1173,15 @@ export function AshveilApp() {
           </ul>
         </div>
       </main>
+      {staffDock}
+      </>
     );
   }
   if (room?.status === "open") {
-    return <LobbyPage code={room.code} onBack={leaveOnline} />;
+    const mapName = MAPS.find((map) => map.id === room.mapId)?.name ?? room.mapId;
+    const modeName = room.mode === "capture" ? "POI capture" : room.mode === "raze" ? "Raze" : "Strike";
+    const summary = room.mode === "strike" || !room.mode ? `${mapName} · ${modeName} · ${room.hqHp ?? onlineHp} HP` : `${mapName} · ${modeName}`;
+    return <LobbyPage code={room.code} summary={summary} onBack={leaveOnline} />;
   }
   if (room?.status === "queue") {
     return (
@@ -1166,6 +1196,7 @@ export function AshveilApp() {
 
   if (!state.match || state.screen === "title") {
     return (
+      <>
       <main className="h-dvh overflow-y-auto bg-bg text-fg">
         {friendBar}
         <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-8">
@@ -1198,7 +1229,7 @@ export function AshveilApp() {
           </header>
           <div className="flex flex-wrap gap-2">
             {botLevel ? (
-              <Btn tone="brass" onClick={() => { keptScroll.fresh = true; sessionStorage.removeItem("ashveil.room"); setRoom(null); dispatch({ type: "new", mapId, bot: botLevel, hqHp: mode === "strike" ? hqHp : undefined, mode, mods: account?.mods }); }}>
+              <Btn tone="brass" onClick={() => { keptScroll.fresh = true; dropStore("session", "ashveil.room"); setRoom(null); dispatch({ type: "new", mapId, bot: botLevel, hqHp: mode === "strike" ? hqHp : undefined, mode, mods: account?.mods }); }}>
                 {`Fight level ${botLevel}`}
               </Btn>
             ) : null}
@@ -1208,7 +1239,7 @@ export function AshveilApp() {
               onClick={() => {
                 setBotLevel(null);
                 keptScroll.fresh = true;
-                sessionStorage.removeItem("ashveil.room");
+                dropStore("session", "ashveil.room");
                 setRoom(null);
                 dispatch({ type: "new", mapId, hqHp: mode === "strike" ? hqHp : undefined, mode, mods: account?.mods });
               }}
@@ -1263,6 +1294,7 @@ export function AshveilApp() {
               <>
                 <Btn onClick={() => setPage("friends")}>Friends</Btn>
                 <Btn onClick={() => setPage("rank")}>Rank</Btn>
+                {account.role ? <Btn onClick={() => setStaffOpen(true)}>Staff</Btn> : null}
                 {account.operator || account.dev || account.username.toLowerCase() === "apollo" ? (
                   <Btn onClick={() => setPage("admin")}>Admin</Btn>
                 ) : null}
@@ -1329,8 +1361,8 @@ export function AshveilApp() {
                 <Btn
                   onClick={() => {
                     void accountLogout({ data: { token: account.token } });
-                    localStorage.removeItem("ashveil.token");
-                    sessionStorage.removeItem("ashveil.room");
+                    dropStore("local", "ashveil.token");
+                    dropStore("session", "ashveil.room");
                     setAccount(null);
                     setRoom(null);
                   }}
@@ -1431,6 +1463,8 @@ export function AshveilApp() {
           </p>
         </div>
       </main>
+      {staffDock}
+      </>
     );
   }
 
@@ -1461,6 +1495,7 @@ export function AshveilApp() {
             : undefined
         }
       />
+      {staffDock}
       </>
     );
   }
@@ -1471,6 +1506,7 @@ export function AshveilApp() {
   return (
     <>
       {friendBar}
+      {staffDock}
       <div inert={passing ? true : undefined} className={passing ? "pointer-events-none" : undefined}>
         <Battle
           state={state}
@@ -1635,12 +1671,12 @@ function Battle({
     (reveal || lookedStruct.owner === p || (identified(lookedStruct.x, lookedStruct.y) && lookedStruct.kind !== "mine"));
   const mapSheet =
     unitKnown && lookedUnit
-      ? unitSheet(UNIT_BY[lookedUnit.kind], lookedUnit.hp, lookedUnit.eta ?? 0, UNIT_BY[lookedUnit.kind].hp + (lookedUnit.plus?.hp || 0))
+      ? unitSheet(UNIT_BY[lookedUnit.kind], lookedUnit.hp, lookedUnit.eta ?? 0, UNIT_BY[lookedUnit.kind].hp + (lookedUnit.plus?.hp || 0), lookedUnit.plus)
       : structKnown && lookedStruct
         ? structSheet(STRUCT_BY[lookedStruct.kind], lookedStruct.hp, lookedStruct.eta ?? 0, lookedStruct.max && lookedStruct.max > 0 ? lookedStruct.max : Math.max(STRUCT_BY[lookedStruct.kind].hp, lookedStruct.hp))
         : null;
   const picked = selUnit
-    ? unitSheet(UNIT_BY[selUnit.kind], selUnit.hp, selUnit.eta ?? 0, UNIT_BY[selUnit.kind].hp + (selUnit.plus?.hp || 0))
+    ? unitSheet(UNIT_BY[selUnit.kind], selUnit.hp, selUnit.eta ?? 0, UNIT_BY[selUnit.kind].hp + (selUnit.plus?.hp || 0), selUnit.plus)
     : selStruct
       ? structSheet(STRUCT_BY[selStruct.kind], selStruct.hp, selStruct.eta ?? 0, selStruct.max && selStruct.max > 0 ? selStruct.max : Math.max(STRUCT_BY[selStruct.kind].hp, selStruct.hp))
       : buy

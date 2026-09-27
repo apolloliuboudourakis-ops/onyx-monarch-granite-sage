@@ -34,6 +34,12 @@ export const Route = createRootRoute({
   component: () => (
     <html lang="en" suppressHydrationWarning>
       <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              'try{var g=globalThis;g.process=g.process||{env:{}};g.process.env=g.process.env||{};if(!g.process.env.TSS_SERVER_FN_BASE)g.process.env.TSS_SERVER_FN_BASE="/_serverFn/";}catch(e){}',
+          }}
+        />
         <HeadContent />
       </head>
       <body>

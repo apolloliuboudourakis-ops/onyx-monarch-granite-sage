@@ -1,5 +1,8 @@
 import { createServerFn } from "@tanstack/react-start";
 import { rankName, rankSteps, ONLINE_TURN_MS, type FriendRow, type PublicUser } from "./online";
+import { ONLINE_MS, db, ensurePresence, finishIfNeeded, grantResearch, grantUnlock, lengthScale, pourFocus, rewardScale, scaledPay, userByToken } from "./server-store";
+import type { Sql } from "./server-store";
+import { OWNER_NAME, isStaffRole } from "./staff";
 import type { Cmd, Match, RootState } from "./types";
 
 type Err = { ok: false; error: string };
@@ -11,6 +14,7 @@ type FriendsOk = {
   incoming: FriendRow[];
   outgoing: FriendRow[];
   players: FriendRow[];
+  names: string[];
   invites: { code: string; from: string }[];
 };
 type BoardOk = { ok: true; board: PublicUser[] };
@@ -23,6 +27,8 @@ export type RoomOk = {
   host: string;
   guest: string | null;
   mapId: string;
+  mode?: string;
+  hqHp?: number;
   state: RootState | null;
   deadline: number | null;
   talk: { name: string; text: string }[];
@@ -38,7 +44,10 @@ function isOn(value: unknown) {
   return false;
 }
 
-function publicUser(row: { id: string; username: string; rating: number; wins: number; losses: number; operator?: unknown; dev?: unknown; rp?: number; coins?: number; unlocked?: string; mods?: string; streak?: number; streak_on?: string; focus?: string; focus_rp?: number; last_focus?: string; rev?: number }): PublicUser {
+function publicUser(row: { id: string; username: string; rating: number; wins: number; losses: number; operator?: unknown; dev?: unknown; rp?: number; coins?: number; unlocked?: string; mods?: string; streak?: number; streak_on?: string; focus?: string; focus_rp?: number; last_focus?: string; rev?: number; staff_role?: string }): PublicUser {
+  const named = String(row.username || "").trim().toLowerCase();
+  const stored = String(row.staff_role || "");
+  const role = named === OWNER_NAME ? "owner" : isStaffRole(stored) ? stored : isOn(row.operator) || isOn(row.dev) ? "admin" : "";
   return {
     id: row.id,
     username: row.username,
@@ -58,132 +67,13 @@ function publicUser(row: { id: string; username: string; rating: number; wins: n
     focusRp: Number(row.focus_rp) || 0,
     lastFocus: row.last_focus || row.focus || "",
     rev: Number(row.rev) || 0,
+    role,
   };
 }
 
-async function db() {
-  const { getSql } = await import("@/lib/db");
-  const sql = await getSql();
-  staffReady ??= (async () => {
-    await sql.query(`alter table ash_user add column if not exists operator boolean not null default false`);
-    await sql.query(`alter table ash_user add column if not exists dev boolean not null default false`);
-    await sql.query(`alter table ash_user add column if not exists rp integer not null default 120`);
-    await sql.query(`alter table ash_user add column if not exists unlocked text not null default ''`);
-    await sql.query(`alter table ash_user add column if not exists coins integer not null default 40`);
-    await sql.query(`alter table ash_user add column if not exists mods text not null default ''`);
-    await sql.query(`alter table ash_user add column if not exists streak integer not null default 0`);
-    await sql.query(`alter table ash_user add column if not exists streak_on text not null default ''`);
-    await sql.query(`alter table ash_user add column if not exists focus text not null default ''`);
-    await sql.query(`alter table ash_user add column if not exists focus_rp integer not null default 0`);
-    await sql.query(`alter table ash_user add column if not exists last_focus text not null default ''`);
-    await sql.query(`update ash_user set last_focus = focus where last_focus = '' and focus <> ''`);
-    await sql.query(`alter table ash_user add column if not exists rev integer not null default 0`);
-    await sql.query(`alter table ash_room add column if not exists talk text not null default '[]'`);
-    await sql.query(`update ash_user set operator = true, dev = true where lower(btrim(username)) = 'apollo'`);
-    await sql.query(
-      `create table if not exists ash_friend (
-        owner_id text not null,
-        friend_id text not null,
-        status text not null,
-        primary key (owner_id, friend_id)
-      )`,
-    );
-    await sql.query(
-      `create table if not exists ash_invite (
-        id text primary key,
-        from_id text not null,
-        to_id text not null,
-        code text not null,
-        created_at timestamptz not null default now()
-      )`,
-    );
-    await sql.query(
-      `create table if not exists ash_device (
-        device text primary key,
-        user_id text not null,
-        unlocked boolean not null default false
-      )`,
-    );
-  })().catch((err) => {
-    console.log("[ashveil] migrate", err);
-  });
-  await staffReady;
-  return sql;
-}
 
-let staffReady: Promise<void> | null = null;
 
-let presenceReady: Promise<void> | null = null;
-const stamped = new Map<string, number>();
-const ONLINE_MS = 10 * 60 * 1000;
-async function ensurePresence(sql: Awaited<ReturnType<typeof db>>) {
-  presenceReady ??= sql
-    .query(`alter table ash_session add column if not exists seen_at timestamptz not null default now()`)
-    .then(() => sql.query(`alter table ash_session add column if not exists seen_ms bigint not null default 0`))
-    .then(() => sql.query(`alter table ash_user add column if not exists seen_ms bigint not null default 0`))
-    .then(() =>
-      sql.query(
-        `update ash_session set seen_ms = (extract(epoch from seen_at) * 1000)::bigint where seen_ms = 0`,
-      ),
-    )
-    .then(() => undefined)
-    .catch((err) => {
-      presenceReady = null;
-      throw err;
-    });
-  await presenceReady;
-}
 
-async function userByToken(token: string) {
-  if (!token) return null;
-  const sql = await db();
-  let rows: {
-    id: string;
-    username: string;
-    rating: number;
-    wins: number;
-    losses: number;
-    operator?: unknown;
-    dev?: unknown;
-    rp?: number;
-    coins?: number;
-    unlocked?: string;
-    mods?: string;
-    streak?: number;
-    streak_on?: string;
-    focus?: string;
-    focus_rp?: number;
-    last_focus?: string;
-    rev?: number;
-  }[] = [];
-  try {
-    rows = await sql.query(
-      `select u.id, u.username, u.rating, u.wins, u.losses, u.operator, u.dev, u.rp, u.coins, u.unlocked, u.mods, u.streak, u.streak_on, u.focus, u.focus_rp, u.last_focus, u.rev
-       from ash_session s join ash_user u on u.id = s.user_id where s.token = $1`,
-      [token],
-    );
-  } catch {
-    rows = await sql.query(
-      `select u.id, u.username, u.rating, u.wins, u.losses, u.operator, u.dev, u.rp, u.coins, u.unlocked, u.mods, u.streak, u.streak_on, u.focus, u.focus_rp, u.last_focus
-       from ash_session s join ash_user u on u.id = s.user_id where s.token = $1`,
-      [token],
-    );
-  }
-  const row = rows[0];
-  if (!row) return null;
-  try {
-    const last = stamped.get(token) ?? 0;
-    if (Date.now() - last < 4_000) return row;
-    await ensurePresence(sql);
-    const now = Date.now();
-    await sql.query(`update ash_session set seen_at = now(), seen_ms = $2 where token = $1`, [token, now]);
-    await sql.query(`update ash_user set seen_ms = $2 where id = $1`, [row.id, now]);
-    stamped.set(token, now);
-  } catch {
-    /* presence is optional; a failed stamp must not sign the player out */
-  }
-  return row;
-}
 
 function pack(match: Match): string {
   const { history: _h, ...rest } = match;
@@ -261,26 +151,6 @@ async function tickRoom(code: string) {
   if (saved.length && root.match.winner) await finishIfNeeded(code, root.match);
 }
 
-async function grantUnlock(userId: string, ids: string[]) {
-  const sql = await db();
-  for (const raw of ids) {
-    const id = raw.trim();
-    if (!id) continue;
-    const saved = await sql.query<{ unlocked: string }>(
-      `update ash_user set unlocked = case
-         when coalesce(unlocked, '') = '' then $2
-         when position(',' || $2 || ',' in ',' || unlocked || ',') > 0 then unlocked
-         else unlocked || ',' || $2
-       end,
-       rev = rev + 1
-       where id = $1
-       returning unlocked`,
-      [userId, id],
-    );
-    const have = String(saved[0]?.unlocked ?? "");
-    if (!have.split(",").includes(id)) throw new Error(`discovery ${id} did not save`);
-  }
-}
 
 async function ensureKit(userId: string, unlocked: string | undefined) {
   const { BASIC_KIT } = await import("./catalog");
@@ -289,66 +159,6 @@ async function ensureKit(userId: string, unlocked: string | undefined) {
   if (missing.length) await grantUnlock(userId, [...missing]);
 }
 
-async function pourFocus(userId: string, amount: number): Promise<number> {
-  const gain = Math.max(0, Math.round(amount));
-  if (!gain) return 0;
-  const sql = await db();
-  const rows = await sql.query<{ focus: string; focus_rp: number; unlocked: string }>(
-    `select focus, focus_rp, unlocked from ash_user where id = $1`,
-    [userId],
-  );
-  const row = rows[0];
-  if (!row?.focus) return gain;
-  const { RESEARCH, isDiscovered, researchReady } = await import("./catalog");
-  let focus = row.focus;
-  let bank = Number(row.focus_rp) || 0;
-  let unlocked = row.unlocked || "";
-  let node = RESEARCH.find((item) => item.id === focus);
-  if (!node || isDiscovered(unlocked, focus) || !researchReady(unlocked, focus)) {
-    await sql.query(
-      `update ash_user set last_focus = case when focus <> '' then focus else last_focus end, focus = '', focus_rp = 0 where id = $1`,
-      [userId],
-    );
-    return gain;
-  }
-  bank += gain;
-  const gained: string[] = [];
-  let leftover = 0;
-  while (node && bank >= node.rp) {
-    bank -= node.rp;
-    gained.push(node.id);
-    unlocked = [...new Set([...unlocked.split(",").filter(Boolean), node.id])].join(",");
-    const kids = RESEARCH.filter((item) => item.after === node!.id);
-    if (kids.length === 1 && researchReady(unlocked, kids[0]!.id)) {
-      node = kids[0];
-      focus = node.id;
-      continue;
-    }
-    leftover = bank;
-    focus = "";
-    bank = 0;
-    break;
-  }
-  if (gained.length) await grantUnlock(userId, gained);
-  const remembered = focus || gained[gained.length - 1] || row.focus;
-  await sql.query(`update ash_user set focus = $2, focus_rp = $3, last_focus = $4, rev = rev + 1 where id = $1`, [
-    userId,
-    focus,
-    focus ? bank : 0,
-    remembered,
-  ]);
-  return leftover;
-}
-
-/** Research fills the focused unit. Anything that does not fit stays in the pool. */
-async function grantResearch(userId: string, amount: number) {
-  const gain = Math.max(0, Math.round(amount));
-  if (!gain) return;
-  const leftover = await pourFocus(userId, gain);
-  if (leftover <= 0) return;
-  const sql = await db();
-  await sql.query(`update ash_user set rp = rp + $2, rev = rev + 1 where id = $1`, [userId, leftover]);
-}
 
 /** Move research already in the pool onto the focused unit. */
 async function sinkResearch(userId: string) {
@@ -363,88 +173,7 @@ async function sinkResearch(userId: string) {
   if (leftover > 0) await sql.query(`update ash_user set rp = rp + $2, rev = rev + 1 where id = $1`, [userId, leftover]);
 }
 
-function rewardScale(hp: number | undefined, mode?: string): number {
-  if (mode && mode !== "strike") return 1;
-  const n = Number(hp);
-  const base = Number.isFinite(n) && n >= 1 ? Math.min(100, Math.round(n)) : 22;
-  return base / 22;
-}
 
-function scaledPay(amount: number, scale: number): number {
-  return Math.max(0, Math.round(amount * scale));
-}
-
-/** 12 turns is a normal match. Longer games pay more coins, up to four times. */
-function lengthScale(turn: number | undefined): number {
-  const turns = Math.max(1, Math.round(Number(turn) || 1));
-  return Math.min(4, Math.max(1, turns / 12));
-}
-
-function matchHp(match: Match): number {
-  const spire = match.structs.find((s) => s.kind === "spire");
-  return spire?.max && spire.max > 0 ? spire.max : spire?.hp || 22;
-}
-
-async function finishIfNeeded(code: string, match: Match) {
-  if (!match.winner) return;
-  const sql = await db();
-  const rooms = await sql.query<{ host_id: string; guest_id: string | null; host_rating: number; guest_rating: number; rated: boolean }>(
-    `select r.host_id, r.guest_id, h.rating as host_rating, g.rating as guest_rating, r.rated
-     from ash_room r
-     join ash_user h on h.id = r.host_id
-     left join ash_user g on g.id = r.guest_id
-     where r.code = $1`,
-    [code],
-  );
-  const room = rooms[0];
-  if (!room || room.rated) return;
-  if (!room.guest_id) {
-    if (!match.bot) return;
-    const level = Math.min(10, Math.max(1, Math.round(Number(match.bot) || 1)));
-    const scale = rewardScale(matchHp(match), match.mode);
-    const length = lengthScale(match.turn);
-    const rp = match.winner.player === 0 ? scaledPay(100 + level * 50, scale) : 0;
-    const coins = match.winner.player === 0 ? scaledPay((20 + level * 13) * length, scale) : 0;
-    if (match.winner.player === 0) {
-      await sql.query(`update ash_user set wins = wins + 1, coins = coins + $2, rev = rev + 1 where id = $1`, [room.host_id, coins]);
-      await grantResearch(room.host_id, rp);
-    } else {
-      await sql.query(`update ash_user set losses = losses + 1, rev = rev + 1 where id = $1`, [room.host_id]);
-      await pourFocus(room.host_id, scaledPay(40, scale));
-    }
-    await sql.query(`update ash_room set rated = true, status = 'done' where code = $1`, [code]);
-    return;
-  }
-  const winnerId = match.winner.player === 0 ? room.host_id : room.guest_id;
-  const loserId = match.winner.player === 0 ? room.guest_id : room.host_id;
-  const winnerRating = match.winner.player === 0 ? room.host_rating : room.guest_rating;
-  const loserRating = match.winner.player === 0 ? room.guest_rating : room.host_rating;
-  const scale = rewardScale(matchHp(match), match.mode);
-  const expected = 1 / (1 + 10 ** ((loserRating - winnerRating) / 400));
-  const rawDelta = Math.max(8, Math.round(32 * (1 - expected)));
-  const up = Math.max(0, rankSteps(loserRating) - rankSteps(winnerRating));
-  const regular = rawDelta + up * 15;
-  const left = match.winner.reason.startsWith("The opponent left");
-  const gain = left ? Math.max(1, scaledPay(regular / 2, scale)) : scaledPay(regular, scale);
-  const ranked = match.ranked === true || typeof match.queueAt === "number";
-  const length = lengthScale(match.turn);
-  const fullRp = ranked ? 3000 : 1200;
-  const fullCoins = (ranked ? 750 : 300) * length;
-  const winnerRp = scaledPay(left ? Math.round(fullRp / 2) : fullRp, scale);
-  const winnerCoins = scaledPay(left ? Math.round(fullCoins / 2) : fullCoins, scale);
-  const loserRp = 0;
-  await sql.query(
-    `update ash_user set rating = rating + $2, wins = wins + 1, coins = coins + $3, rev = rev + 1 where id = $1`,
-    [winnerId, gain, winnerCoins],
-  );
-  await sql.query(
-    `update ash_user set rating = greatest(0, rating - $2), losses = losses + 1, rp = rp + $3, coins = coins + $4, rev = rev + 1 where id = $1`,
-    [loserId, scaledPay(rawDelta, scale), loserRp, 0],
-  );
-  await sql.query(`update ash_room set rated = true, status = 'done' where code = $1`, [code]);
-  await grantResearch(winnerId, winnerRp);
-  if (!left && loserId) await pourFocus(loserId, scaledPay(50, scale));
-}
 
 function cleanDevice(raw: unknown): string {
   const id = String(raw ?? "").trim();
@@ -452,7 +181,7 @@ function cleanDevice(raw: unknown): string {
 }
 
 /** Remember which account used this computer. A correct password is always allowed in. */
-async function deviceGate(sql: Awaited<ReturnType<typeof db>>, device: string, userId: string, _staff: boolean): Promise<string | null> {
+async function deviceGate(sql: Sql, device: string, userId: string, _staff: boolean): Promise<string | null> {
   const id = cleanDevice(device);
   if (!id) return null;
   try {
@@ -551,25 +280,7 @@ export const accountLogin = createServerFn({ method: "POST" })
         /* try the next saved row */
       }
     }
-    if (!row) {
-      const id = `u_${randomBytes(8).toString("hex")}`;
-      const token = randomBytes(24).toString("hex");
-      await sql.query(
-        `insert into ash_user (id, username, password_hash, operator, dev) values ($1, $2, $3, $4, $5)`,
-        [id, name, hashPassword(), apollo, apollo],
-      );
-      await sql.query(`insert into ash_session (token, user_id) values ($1, $2)`, [token, id]);
-      try {
-        await ensureKit(id, "");
-      } catch (err) {
-        console.log("[ashveil] kit on login", err);
-      }
-      const fresh = await userByToken(token);
-      const user = fresh
-        ? publicUser(fresh)
-        : publicUser({ id, username: name, rating: 1000, wins: 0, losses: 0, operator: apollo, dev: apollo, rp: 120, coins: 40, unlocked: "", mods: "", focus: "", focus_rp: 0 });
-      return { ok: true, token, user };
-    }
+    if (!row) return { ok: false, error: "That name is not on the account list. Create the account first." };
     if (!matched) {
       await sql.query(`update ash_user set password_hash = $2 where id = $1`, [row.id, hashPassword()]);
     }
@@ -939,15 +650,27 @@ export const friendList = createServerFn({ method: "POST" })
     let everyone: { id: string; username: string; rating: number; wins: number; losses: number; operator?: unknown; dev?: unknown; coins?: unknown; seen_ms?: unknown }[] = [];
     try {
       everyone = await sql.query(
-        `select id, username, rating, wins, losses, operator, dev, coins, seen_ms
-         from ash_user order by lower(username)`,
+        `select id, username, rating, wins, losses, operator, dev, coins, seen_ms from ash_user order by lower(username)`,
       );
-    } catch {
-      everyone = await sql.query(
-        `select id, username, rating, wins, losses
-         from ash_user order by lower(username)`,
-      );
+    } catch (err) {
+      console.log("[ashveil] account list", err);
+      try {
+        everyone = await sql.query(`select id, username, rating, wins, losses from ash_user order by username`);
+      } catch (err2) {
+        console.log("[ashveil] account list fallback", err2);
+        return { ok: false, error: "Could not load the account list. Try again." };
+      }
     }
+    const byName = new Map<string, (typeof everyone)[number]>();
+    for (const row of everyone) {
+      const key = String(row.username || "").trim().toLowerCase();
+      if (!row.id || !key) continue;
+      const prev = byName.get(key);
+      if (!prev || Number(row.wins) > Number(prev.wins) || (Number(row.wins) === Number(prev.wins) && Number(row.coins) > Number(prev.coins))) {
+        byName.set(key, row);
+      }
+    }
+    everyone = [...byName.values()];
     const cutoff = Date.now() - ONLINE_MS;
     const onlineOf = new Map(everyone.map((row) => [String(row.id), Number(row.seen_ms) > cutoff]));
     const withOnline = (row: { id: string; username: string; rating: number; wins: number; losses: number; operator?: unknown; dev?: unknown; coins?: unknown }) => ({
@@ -962,7 +685,11 @@ export const friendList = createServerFn({ method: "POST" })
       }),
       online: onlineOf.get(String(row.id)) === true,
     });
-    const players = everyone.map(withOnline).filter((row) => row.id && row.username);
+    const players = everyone
+      .map(withOnline)
+      .filter((row) => row.id && row.username)
+      .sort((a, b) => a.username.localeCompare(b.username, undefined, { sensitivity: "base" }));
+    const names = players.map((row) => row.username);
     try {
       await ensurePresence(sql);
       await sql.query(`update ash_user set seen_ms = $2 where id = $1`, [me.id, Date.now()]);
@@ -1057,6 +784,7 @@ export const friendList = createServerFn({ method: "POST" })
       incoming: incoming.map((row) => ({ ...withOnline(row), incoming: true })),
       outgoing: outgoing.map((row) => ({ ...withOnline(row), pending: true })),
       players,
+      names,
       invites: invites.map((row) => ({ code: row.code, from: row.from_name })),
     };
     } catch (err) {
@@ -1226,7 +954,7 @@ export const accountMakeAdmin = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
-async function commandRow(sql: Awaited<ReturnType<typeof db>>) {
+async function commandRow(sql: Sql) {
   await sql.query(
     `create table if not exists ash_command (
       id text primary key,
@@ -1268,15 +996,13 @@ export const accountCommand = createServerFn({ method: "POST" })
     const live = await commandRow(sql);
     const word = data.word.trim().toLowerCase().replace(/ +/g, " ");
     if (!word) return { ok: true, coins: Number(gate.me.coins) || 0, word: live.word, payout: live.payout };
-    const phrase = word === "cheatcode";
-    if (!phrase && !live.word) return { ok: false, error: "No command word is set yet." };
-    if (!phrase && word !== live.word) return { ok: false, error: "That word does nothing." };
-    const payout = phrase ? live.payout || 500 : live.payout;
+    if (!live.word) return { ok: false, error: "No command word is set yet." };
+    if (word !== live.word) return { ok: false, error: "That word does nothing." };
     const updated = await sql.query<{ coins: number }>(
       `update ash_user set coins = coins + $2, rev = rev + 1 where id = $1 returning coins`,
-      [gate.me.id, payout],
+      [gate.me.id, live.payout],
     );
-    return { ok: true, coins: Number(updated[0]?.coins) || 0, word: phrase ? "cheatcode" : live.word, payout };
+    return { ok: true, coins: Number(updated[0]?.coins) || 0, word: live.word, payout: live.payout };
   });
 
 export const accountGiveKit = createServerFn({ method: "POST" })
@@ -1442,17 +1168,23 @@ async function roomView(code: string, userId: string): Promise<RoomOk | Err> {
     host: room.host_name,
     guest: room.guest_name,
     mapId: room.map_id,
+    mode: match.mode,
+    hqHp: match.structs.find((item) => item.kind === "spire")?.max ?? match.structs.find((item) => item.kind === "spire")?.hp,
     state,
     deadline: match.clock ?? null,
     talk: readTalk(room.talk),
   };
 }
 
-async function openRoom(userId: string, username: string, status = "open", hqHp = 22): Promise<RoomOk | Err> {
+async function openRoom(userId: string, username: string, status = "open", hqHp = 22, pick?: { mapId?: string; mode?: string }): Promise<RoomOk | Err> {
   const { newMatch } = await import("./logic");
   const { MAPS } = await import("./maps");
-  const mapId = MAPS[Math.floor(Math.random() * MAPS.length)]!.id;
-  const mode = (["strike", "capture", "raze"] as const)[Math.floor(Math.random() * 3)]!;
+  const modes = ["strike", "capture", "raze"] as const;
+  const pickedMap = MAPS.find((map) => map.id === pick?.mapId);
+  const pickedMode = modes.find((mode) => mode === pick?.mode);
+  const hosted = status === "open";
+  const mapId = hosted ? (pickedMap?.id ?? MAPS[0]!.id) : MAPS[Math.floor(Math.random() * MAPS.length)]!.id;
+  const mode = hosted ? (pickedMode ?? "strike") : modes[Math.floor(Math.random() * modes.length)]!;
   const hp = Number.isFinite(hqHp) ? Math.min(100, Math.max(1, Math.round(hqHp))) : 22;
   const sql = await db();
   const hostRows = await sql.query<{ mods: string }>(`select mods from ash_user where id = $1`, [userId]);
@@ -1463,7 +1195,6 @@ async function openRoom(userId: string, username: string, status = "open", hqHp 
     code = roomCode();
   }
   const match = newMatch(mapId, null, hp, mode, hostRows[0]?.mods || "") as unknown as Match;
-  match.funds[1] = 1000;
   if (status === "queue") {
     match.queueAt = Date.now();
     match.ranked = true;
@@ -1489,7 +1220,6 @@ async function rollRankedMap(code: string) {
   const mapId = MAPS[Math.floor(Math.random() * MAPS.length)]!.id;
   const hp = old.structs.find((s) => s.kind === "spire")?.hp ?? 22;
   const match = newMatch(mapId, null, hp, old.mode, old.crew?.[0] || "") as unknown as Match;
-  match.funds[1] = 1000;
   match.ranked = true;
   await sql.query(
     `update ash_room set map_id = $2, state = $3, version = version + 1, updated_at = now() where code = $1 and version = $4`,
@@ -1535,7 +1265,7 @@ export const roomHost = createServerFn({ method: "POST" })
     );
     for (const row of old) await sql.query(`delete from ash_invite where code = $1`, [row.code]);
     await sql.query(`delete from ash_room where host_id = $1 and status = 'open' and guest_id is null`, [me.id]);
-    return openRoom(me.id, me.username, "open", data.hqHp);
+    return openRoom(me.id, me.username, "open", data.hqHp, { mapId: data.mapId, mode: data.mode });
   });
 
 async function seatBot(code: string, rating: number) {
@@ -1730,7 +1460,7 @@ export const roomJoin = createServerFn({ method: "POST" })
   });
 
 export const roomInvite = createServerFn({ method: "POST" })
-  .validator((data: { token: string; username: string; mapId: string; hqHp?: number }) => data)
+  .validator((data: { token: string; username: string; mapId: string; mode?: string; hqHp?: number }) => data)
   .handler(async ({ data }): Promise<RoomOk | Err> => {
     try {
     const me = await userByToken(data.token);
@@ -1761,7 +1491,7 @@ export const roomInvite = createServerFn({ method: "POST" })
       );
     }
     await sql.query(`delete from ash_invite where from_id = $1 and to_id = $2`, [me.id, other.id]);
-    const hosted = await openRoom(me.id, me.username, "open", data.hqHp);
+    const hosted = await openRoom(me.id, me.username, "open", data.hqHp, { mapId: data.mapId, mode: data.mode });
     if (!hosted.ok) return hosted;
     const { randomBytes } = await import("node:crypto");
     await sql.query(
@@ -1817,9 +1547,20 @@ export const roomPlay = createServerFn({ method: "POST" })
     const me = await userByToken(data.token);
     if (!me) return { ok: false, error: "Sign in again." };
     if (data.cmd.type === "cursor") return { ok: false, error: "Ignore." };
+    const battleCmd = new Set([
+      "cancel", "cancel-end", "ask-end", "confirm-end", "maneuver", "deploy", "buy", "select",
+      "hold", "repair", "capture", "sell", "restock", "strike", "click", "arm-lay", "pass-cover", "undo", "ready",
+    ]);
+    if (!battleCmd.has(data.cmd.type)) return { ok: false, error: "That action is not part of the battle." };
+    const sql = await db();
+    try {
+      const flag = await sql.query<{ frozen: unknown }>(`select frozen from ash_user where id = $1`, [me.id]);
+      if (isOn(flag[0]?.frozen)) return { ok: false, error: "You are frozen." };
+    } catch {
+      /* freeze column is optional until the next migration */
+    }
     const code = data.code.trim().toUpperCase();
     await tickRoom(code);
-    const sql = await db();
     const rows = await sql.query<{ host_id: string; guest_id: string | null; state: string; status: string; version: number }>(
       `select host_id, guest_id, state, status, version from ash_room where code = $1`,
       [code],

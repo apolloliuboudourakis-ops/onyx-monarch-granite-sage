@@ -2932,6 +2932,7 @@ export const RESEARCH: ResearchNode[] = [
   { id: "fifty", line: "Snipers", after: "materiel", rp: 380 },
   { id: "sabot", line: "Snipers", after: "fifty", rp: 560 },
   { id: "penetrator", line: "Snipers", after: "sabot", rp: 760 },
+  { id: "layer", line: "Minelayers", after: "dish", rp: 180 },
   { id: "seeder", line: "Minelayers", after: "layer", rp: 160 },
   { id: "planter", line: "Minelayers", after: "seeder", rp: 320 },
   { id: "carpet", line: "Minelayers", after: "planter", rp: 500 },
@@ -3003,7 +3004,6 @@ export const RESEARCH: ResearchNode[] = [
   { id: "pathfinder", line: "Air", after: "vault", rp: 760 },
   { id: "seamark", line: "Air", after: "pathfinder", rp: 920 },
   { id: "dish", line: "Works", after: "radar", rp: 140 },
-  { id: "layer", line: "Works", after: "dish", rp: 180 },
   { id: "tower", line: "Works", after: "radar", rp: 80 },
   { id: "mast", line: "Works", after: "tower", rp: 160 },
   { id: "turret", line: "Works", after: "radar", rp: 160 },
@@ -3101,7 +3101,7 @@ export function unitBonus(mods: string | undefined, kind: string): { atk: number
 export const MINE_DAMAGE = 8;
 export const CAP_OUTPOST = 20;
 export const CAP_SPIRE = 30;
-export const OPENING_PURSE: [number, number] = [1000, 1000];
+export const OPENING_PURSE: [number, number] = [10000, 10000];
 
 export const FACTIONS = [
   { name: "North", player: "Player 1", seat: "Moves first" },

@@ -245,6 +245,8 @@ export interface Match {
   kills?: [number, number];
   /** Comma lists of kind:slot upgrades for each seat. */
   crew?: [string, string];
+  /** Raze only. Buildings, other than mines, destroyed for each seat. */
+  razed?: [number, number];
 }
 
 export type Selection =

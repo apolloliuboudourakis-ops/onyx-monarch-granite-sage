@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { accountDelete, accountDevice, accountGiveCoins, accountGiveKit, accountLogin, accountMe, accountRegister, accountResearch, accountFocus, accountResetRank, accountUpgrade, accountChest, accountMakeAdmin, accountCommand, accountSetCommand, friendAdd, friendAnswer, friendList, friendRemove, rankBoard, roomInvite, roomJoin } from "@/game/online.functions";
 import { BASIC_KIT, BUY_ORDER, MOD_OFFERS, RESEARCH, STRUCT_BY, UNIT_BY, hitBand, isDiscovered, isUnitKind, lineRoots, ownsMod, type ResearchNode } from "@/game/catalog";
-import { plateTitle, rankSteps, type FriendRow, type PublicUser } from "@/game/online";
+import { dropStore, plateTitle, rankSteps, readStore, writeStore, type FriendRow, type PublicUser } from "@/game/online";
 import type { RoomOk } from "@/game/online.functions";
 
-function Btn({
+export function Btn({
   tone = "ghost",
   className = "",
   type = "button",
@@ -157,10 +157,10 @@ export function TurnClock({ deadline, onZero }: { deadline: number; onZero?: () 
 function thisDevice(): string {
   try {
     const fromCookie = decodeURIComponent(document.cookie.match(/(?:^|; )ashveil\.device=([^;]*)/)?.[1] ?? "");
-    const stored = localStorage.getItem("ashveil.device") || "";
+    const stored = readStore("local", "ashveil.device") || "";
     let device = /^[A-Za-z0-9_-]{12,80}$/.test(stored) ? stored : fromCookie;
     if (!/^[A-Za-z0-9_-]{12,80}$/.test(device)) device = `d_${crypto.randomUUID().replace(/-/g, "")}`;
-    localStorage.setItem("ashveil.device", device);
+    writeStore("local", "ashveil.device", device);
     document.cookie = `ashveil.device=${encodeURIComponent(device)}; Max-Age=31536000; Path=/; SameSite=Lax`;
     return device;
   } catch {
@@ -275,6 +275,7 @@ export function FriendsPage({
   token,
   username,
   mapId,
+  mode,
   hqHp,
   staff,
   purse,
@@ -287,6 +288,7 @@ export function FriendsPage({
   token: string;
   username: string;
   mapId: string;
+  mode: string;
   hqHp: number;
   staff: boolean;
   purse: number;
@@ -330,11 +332,8 @@ export function FriendsPage({
   const unique = (rows: FriendRow[]) => {
     const seen = new Set<string>();
     return rows.filter((row) => {
-      const key = `${row.id}|${row.username.toLowerCase()}`;
-      if (seen.has(row.id) || seen.has(key) || seen.has(row.username.toLowerCase())) return false;
+      if (!row.id || seen.has(row.id)) return false;
       seen.add(row.id);
-      seen.add(key);
-      seen.add(row.username.toLowerCase());
       return true;
     });
   };
@@ -352,7 +351,7 @@ export function FriendsPage({
     setError("");
     setNote("Resetting this device and loading every account again.");
     try {
-      sessionStorage.removeItem("ashveil.room");
+      dropStore("session", "ashveil.room");
       if ("caches" in window) void caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key))));
     } catch {
       /* this browser can still reload */
@@ -375,10 +374,13 @@ export function FriendsPage({
       setFriends(nextFriends);
       setIncoming(unique(res.incoming).filter((row) => !taken.has(row.username.toLowerCase())));
       setOutgoing(unique(res.outgoing).filter((row) => !taken.has(row.username.toLowerCase())));
-      setPlayers(unique(res.players));
+      const order = new Map((res.names ?? []).map((name, index) => [name.toLowerCase(), index]));
+      setPlayers(
+        [...(res.players ?? [])].sort((a, b) => (order.get(a.username.toLowerCase()) ?? 0) - (order.get(b.username.toLowerCase()) ?? 0)),
+      );
       setInvites(res.invites);
       try {
-        sessionStorage.removeItem("ashveil.friendReload");
+        dropStore("session", "ashveil.friendReload");
       } catch {
         /* ignore */
       }
@@ -392,8 +394,8 @@ export function FriendsPage({
       const msg = err instanceof Error ? err.message : "";
       if (msg.includes("content-type")) {
         try {
-          if (!sessionStorage.getItem("ashveil.friendReload")) {
-            sessionStorage.setItem("ashveil.friendReload", "1");
+          if (!readStore("session", "ashveil.friendReload")) {
+            writeStore("session", "ashveil.friendReload", "1");
             window.location.reload();
             return;
           }
@@ -571,9 +573,9 @@ export function FriendsPage({
             </>
           ) : null}
           {players.length === 0 ? (
-            <p className="text-sm text-muted">No accounts are saved on this server yet.</p>
+            <p className="text-sm text-muted">No accounts are saved on this server yet. Create one from Log in.</p>
           ) : (
-            <p className="text-sm text-muted">{players.length} account{players.length === 1 ? "" : "s"} on this server. Your friend sees this same list when they open this same game.</p>
+            <p className="text-sm text-muted">{players.map((row) => row.username).join(", ")}</p>
           )}
           {players.map((row) => {
             const mine = row.username.toLowerCase() === username.toLowerCase();
@@ -748,7 +750,7 @@ export function FriendsPage({
                   <Btn
                     tone="brass"
                     onClick={() =>
-                      void roomInvite({ data: { token, username: row.username, mapId, hqHp } }).then((res) => {
+                      void roomInvite({ data: { token, username: row.username, mapId, mode, hqHp } }).then((res) => {
                         if (!res.ok) setError(res.error);
                         else onRoom(res);
                       }).catch(() => setError("Could not send that invite."))
@@ -789,7 +791,7 @@ export function FriendsPage({
               <Btn
                 tone="brass"
                 onClick={() =>
-                  void roomInvite({ data: { token, username: row.username, mapId, hqHp } }).then((res) => {
+                  void roomInvite({ data: { token, username: row.username, mapId, mode, hqHp } }).then((res) => {
                     if (!res.ok) setError(res.error);
                     else onRoom(res);
                   }).catch(() => setError("Could not send that invite."))
@@ -931,7 +933,7 @@ export function ResearchPage({
     </span>
   );
   const showTip = (offer: (typeof MOD_OFFERS)[number]) => setTip(`${offer.name}: ${offer.blurb}. Costs ${offer.coins} coins. It applies the next time you build that unit.`);
-  const kidsOf = (id: string) => RESEARCH.filter((node) => node.after === id);
+  const kidsOf = (id: string) => RESEARCH.filter((node) => node.after === id && node.line === lane);
   const nodeCard = (node: ResearchNode) => {
     const have = isDiscovered(user.unlocked, node.id);
     const prev = node.after ? nameOf(node.after) : null;
@@ -973,7 +975,7 @@ export function ResearchPage({
         {forks > 1 ? <span className="text-xs text-brass">Separates into {forks} lanes</span> : null}
         {have && isUnitKind(node.id) ? upgrades(node.id) : null}
         {have && !isUnitKind(node.id) ? <span className="text-xs text-muted">Ready to buy</span> : null}
-        {!have && prevReady ? (
+        {!have ? (
           <Btn
             tone={focused ? "brass" : "ghost"}
             onClick={() => {
@@ -1371,23 +1373,8 @@ export function AdminPage({ token, onBack }: { token: string; onBack: () => void
         <Btn type="submit" tone="brass">Set word</Btn>
       </form>
       <p className="text-sm text-muted">
-        {liveWord ? `The word ${liveWord} pays ${livePay} coins.` : "No command word yet. Set the word and how many coins it pays."} The phrase cheatcode always pays{livePay ? ` ${livePay}` : " 500"} coins.
+        {liveWord ? `The word ${liveWord} pays ${livePay} coins.` : "No command word yet. Set the word and how many coins it pays."}
       </p>
-      <Btn
-        tone="brass"
-        onClick={() => {
-          void accountCommand({ data: { token, word: "cheatcode" } }).then((res) => {
-            if (!res.ok) setError(res.error);
-            else {
-              setError("");
-              setNote(`cheatcode paid ${res.payout}. You now have ${res.coins} coins.`);
-              void load();
-            }
-          });
-        }}
-      >
-        cheatcode
-      </Btn>
       <form
         className="flex flex-wrap items-center gap-2"
         onSubmit={(e) => {
@@ -1578,10 +1565,19 @@ export function RankPage({ token, onBack }: { token: string; onBack: () => void 
   );
 }
 
-export function LobbyPage({ code, onBack }: { code: string; onBack: () => void }) {
+export function LobbyPage({
+  code,
+  summary,
+  onBack,
+}: {
+  code: string;
+  summary?: string;
+  onBack: () => void;
+}) {
   return (
     <Shell title="Waiting" onBack={onBack} backLabel="Home">
-      <p className="text-sm text-muted">Give this code to the other player. It also appears at the top of their screen if you invited them. The match starts when they press Join. Each turn lasts 1:30.</p>
+      <p className="text-sm text-muted">Give this code to the other player. The match uses the map, mode, and base HP you picked. Anyone who hosts can choose those. Ranked match still rolls them. The match starts when they press Join. Each turn lasts 1:30.</p>
+      {summary ? <p className="text-sm text-brass">{summary}</p> : null}
       <p className="font-display text-6xl tracking-widest">{code}</p>
     </Shell>
   );

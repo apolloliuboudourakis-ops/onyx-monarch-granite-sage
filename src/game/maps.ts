@@ -114,7 +114,46 @@ function grow(rows: string[]): string[] {
       map = [...map, proto];
     }
   }
-  return mirrorSides(map);
+  return supplyBases(mirrorSides(map));
+}
+
+/** One neutral supply base on each side and one in the middle, the same distance for both teams. */
+function supplyBases(rows: string[]): string[] {
+  let next = rows;
+  const a = findGlyph(next, "1");
+  const b = findGlyph(next, "2");
+  if ((a.x + b.x) % 2 === 1) {
+    next = insertCol(next, Math.max(a.x, b.x));
+    next = mirrorSides(next);
+  }
+  const grid = next.map((row) => row.split(""));
+  const h = grid.length;
+  const w = grid[0]!.length;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (grid[y]![x] === "o") grid[y]![x] = ".";
+  let left = { x: -1, y: -1 };
+  let right = { x: -1, y: -1 };
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (grid[y]![x] === "1") left = { x, y };
+    if (grid[y]![x] === "2") right = { x, y };
+  }
+  if (left.x > right.x) {
+    const swap = left;
+    left = right;
+    right = swap;
+  }
+  const y = left.y;
+  const span = right.x - left.x;
+  const side = Math.max(6, Math.min(11, Math.round(span * 0.22)));
+  const spots = [left.x + side, Math.round((left.x + right.x) / 2), right.x - side];
+  for (let x = left.x + 1; x < right.x; x++) {
+    const c = grid[y]![x]!;
+    if (c === "w" || c === "r") grid[y]![x] = "=";
+  }
+  for (const x of spots) {
+    if (x <= 0 || x >= w - 1 || grid[y]![x] === "1" || grid[y]![x] === "2") continue;
+    grid[y]![x] = "o";
+  }
+  return grid.map((row) => row.join(""));
 }
 
 function swapSeat(c: string): string {
@@ -140,8 +179,6 @@ function mirrorSides(rows: string[]): string[] {
     if (mx === x && my === y) continue;
     if (my < 0 || mx < 0 || my >= h || mx >= w) continue;
     const c = rows[y]![x]!;
-    const d = rows[my]![mx]!;
-    next[y]![x] = swapSeat(d);
     next[my]![mx] = swapSeat(c);
   }
   return next.map((row) => row.join(""));
@@ -201,7 +238,7 @@ export const MAPS: MapDef[] = [
     id: "kiln",
     name: "West Canal",
     kind: "mixed",
-    blurb: "A long road and a canal on the west flank. Ships run the water. Neutral supply bases sit on the road.",
+    blurb: "A long road and a canal on the west flank. Ships run the water. A neutral supply base sits on each side and one in the middle.",
     rows: grow([
       "wwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
       "wwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
@@ -285,7 +322,7 @@ export const MAPS: MapDef[] = [
     id: "harbor",
     name: "Harbor",
     kind: "mixed",
-    blurb: "A large bay with a dock off each headquarters. Ships sail the water around the island. Build a supply base if you want more income.",
+    blurb: "A large bay with a dock off each headquarters. A neutral supply base sits on each shore and one in the middle.",
     rows: grow([
       "wwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
       "wwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
@@ -313,7 +350,7 @@ export const MAPS: MapDef[] = [
     id: "plain",
     name: "The Plain",
     kind: "land",
-    blurb: "Open country. No water and no ships. A road runs from headquarters to headquarters, with woods and ridges on the flanks.",
+    blurb: "Open country. No ships. A road runs from headquarters to headquarters. A neutral supply base sits on each side and one in the middle.",
     rows: grow([
       "..............................",
       "..fffff................fffff..",
@@ -341,7 +378,7 @@ export const MAPS: MapDef[] = [
     id: "heights",
     name: "High Ground",
     kind: "land",
-    blurb: "Ridges cut the field into lanes. No coast. The marked supply bases are the fight in the middle. Hold a gap, then shell the headquarters.",
+    blurb: "Ridges cut the field into lanes. No coast. A neutral supply base sits on each side and one in the middle.",
     rows: grow([
       "..............................",
       ".rrrrrrrrrrr..rrrrrrrrrrrrrrr.",
@@ -369,7 +406,7 @@ export const MAPS: MapDef[] = [
     id: "ocean",
     name: "Open Ocean",
     kind: "sea",
-    blurb: "Two islands and a lot of water. Ships own the crossing. Aircraft hop the gap. Ground troops stay on their island.",
+    blurb: "Two islands and open water, with a road between them. A neutral supply base sits on each island and one in the middle.",
     rows: grow([
       "wwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
       "wwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
@@ -397,7 +434,7 @@ export const MAPS: MapDef[] = [
     id: "strait",
     name: "The Strait",
     kind: "sea",
-    blurb: "Land on both shores, open water between. Dock a fleet or fly over. Nothing but the two headquarters is already built.",
+    blurb: "Land on both shores and open water between them. A neutral supply base sits on each shore and one in the middle.",
     rows: grow([
       "..fffff.......................",
       "..fffff........o..............",
@@ -474,8 +511,30 @@ function assertMaps(): void {
       }
     }
     if (s0 !== 1 || s1 !== 1) throw new Error(`${map.id} spires ${s0}/${s1}`);
+    const posts: { x: number; y: number }[] = [];
+    for (let y = 0; y < map.rows.length; y++) {
+      for (let x = 0; x < w; x++) if (map.rows[y]![x] === "o") posts.push({ x, y });
+    }
+    if (posts.length !== 3) throw new Error(`${map.id} supply bases ${posts.length}`);
     const start = sp.find((p) => p.c === "1")!;
     const goal = sp.find((p) => p.c === "2")!;
+    const manh = (p: { x: number; y: number }, q: { x: number; y: number }) => Math.abs(p.x - q.x) + Math.abs(p.y - q.y);
+    const sideL = [...posts].sort((p, q) => manh(p, start) - manh(q, start))[0]!;
+    const sideR = [...posts].sort((p, q) => manh(p, goal) - manh(q, goal))[0]!;
+    const mid = posts.find((p) => p !== sideL && p !== sideR)!;
+    if (manh(start, sideL) !== manh(goal, sideR) || manh(start, mid) !== manh(goal, mid)) {
+      throw new Error(`${map.id} supply bases are not even`);
+    }
+    for (let y = 0; y < map.rows.length; y++) {
+      for (let x = 0; x < w; x++) {
+        const mx = start.x + goal.x - x;
+        const my = start.y + goal.y - y;
+        if (my < 0 || mx < 0 || my >= map.rows.length || mx >= w) continue;
+        const c = map.rows[y]![x]!;
+        const d = map.rows[my]![mx]!;
+        if (c !== (d === "1" ? "2" : d === "2" ? "1" : d)) throw new Error(`${map.id} is not mirrored`);
+      }
+    }
     const q = [start];
     const seen = new Set([`${start.x},${start.y}`]);
     let hit = false;

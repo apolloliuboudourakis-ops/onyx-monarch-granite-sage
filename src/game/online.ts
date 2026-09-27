@@ -17,6 +17,8 @@ export type PublicUser = {
   focusRp: number;
   lastFocus?: string;
   rev: number;
+  /** Server role: owner, admin, moderator, builder, or empty. Never trust a value the browser invents. */
+  role: string;
 };
 
 export type FriendRow = PublicUser & { pending?: boolean; incoming?: boolean; online?: boolean };
@@ -67,3 +69,48 @@ export function plateTitle(rating: number, operator?: boolean, dev?: boolean): s
 
 /** Online turns last this long. The turn ends when it runs out. */
 export const ONLINE_TURN_MS = 90 * 1000;
+
+/**
+ * This computer may refuse localStorage (private mode, or the preview iframe).
+ * A throw there used to stop the whole page from starting, so accounts, friends,
+ * and join never ran. Memory keeps the session for this tab when disk storage fails.
+ */
+const memoryStore = new Map<string, string>();
+
+function browserStore(kind: "local" | "session"): Storage | null {
+  try {
+    if (typeof window === "undefined") return null;
+    return kind === "local" ? window.localStorage : window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function readStore(kind: "local" | "session", key: string): string | null {
+  const saved = memoryStore.get(`${kind}:${key}`);
+  try {
+    const store = browserStore(kind);
+    if (!store) return saved ?? null;
+    return store.getItem(key);
+  } catch {
+    return saved ?? null;
+  }
+}
+
+export function writeStore(kind: "local" | "session", key: string, value: string): void {
+  memoryStore.set(`${kind}:${key}`, value);
+  try {
+    browserStore(kind)?.setItem(key, value);
+  } catch {
+    /* keep the in-memory copy */
+  }
+}
+
+export function dropStore(kind: "local" | "session", key: string): void {
+  memoryStore.delete(`${kind}:${key}`);
+  try {
+    browserStore(kind)?.removeItem(key);
+  } catch {
+    /* already gone */
+  }
+}

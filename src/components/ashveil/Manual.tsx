@@ -66,7 +66,7 @@ export function Manual({ onBack }: { onBack: () => void }) {
             Pick the mode on the home screen for a local game. Online rolls the mode for you. Local Base HP is the number you type, from 1 to 100. Online Base HP is 10, 20, 40, 60, 80, or 100.
           </p>
           <p className="text-muted">
-            North moves first with a 1,000 purse plus opening income. A same-screen duel gives South the same purse, the same buy list, and the same upgrades. Each side also starts with its own supply base, orange for North and blue for South. Neutral bases in the middle can still be captured. A captured base pays +200 and lets you build closer. Taking one back from the enemy takes longer. Infantry or a Sniper captures in one action if they are healthy.
+            North moves first with a 10,000 purse plus opening income. A same-screen duel gives South the same purse, the same buy list, and the same upgrades. A neutral supply base sits near each Headquarters, and a third sits in the middle. All three start unowned. A captured base pays +200 and lets you build closer. Taking one back from the enemy takes longer. Infantry or a Sniper captures in one action if they are healthy.
           </p>
         </section>
 

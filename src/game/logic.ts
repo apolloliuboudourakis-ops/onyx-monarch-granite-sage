@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { FACTIONS, OPENING_PURSE, STRUCT_BY, UNIT_BY, damageOf, hitChance, isUnitKind } from "./catalog";
+import { FACTIONS, OPENING_PURSE, STRUCT_BY, UNIT_BY, damageOf, hitChance, isUnitKind, unitBonus } from "./catalog";
 import { MAPS, MAP_BY, charTerrain } from "./maps";
 
 var SAVE_KEY = "ashveil-match-v1";
@@ -43,10 +43,19 @@ function emptyRoot() {
 		hasSave: false
 	};
 }
-function loadRoot() {
-	if (typeof localStorage === "undefined") return null;
+function disk() {
 	try {
-		const raw = localStorage.getItem(SAVE_KEY);
+		if (typeof window === "undefined") return null;
+		return window.localStorage;
+	} catch {
+		return null;
+	}
+}
+function loadRoot() {
+	try {
+		const store = disk();
+		if (!store) return null;
+		const raw = store.getItem(SAVE_KEY);
 		if (!raw) return null;
 		const parsed = JSON.parse(raw);
 		if (parsed.v !== 1 || !parsed.state) return null;
@@ -61,17 +70,22 @@ function loadRoot() {
 	}
 }
 function persistRoot(s) {
-	if (typeof localStorage === "undefined") return;
+	const store = disk();
+	if (!store) return;
 	if (s.screen === "title" || s.screen === "manual" || !s.match) return;
 	const copy = structuredClone(s);
 	if (copy.match) {
 		copy.match.history = null;
 		copy.match.fx = [];
 	}
-	localStorage.setItem(SAVE_KEY, JSON.stringify({
-		v: 1,
-		state: copy
-	}));
+	try {
+		store.setItem(SAVE_KEY, JSON.stringify({
+			v: 1,
+			state: copy
+		}));
+	} catch {
+		/* this computer blocked storage; the match still runs */
+	}
 }
 function logTo(m, p, msg) {
 	m.log[p] = [...m.log[p], msg].slice(-40);
@@ -205,11 +219,13 @@ function refreshIntel(m, p) {
 	const sense = (x, y) => !!(cov.identified[y]?.[x] || cov.radar[y]?.[x]);
 	for (const u of m.units) {
 		if (u.owner === p || !sense(u.x, u.y)) continue;
+		const clear = !!(cov.identified[u.y]?.[u.x]);
 		const prev = tracked.get(u.id);
 		tracked.set(u.id, {
 			id: u.id,
 			domain: UNIT_BY[u.kind].domain,
-			kind: prev?.kind,
+			kind: clear ? u.kind : prev?.kind,
+			place: "unit",
 			x: u.x,
 			y: u.y
 		});
@@ -217,11 +233,13 @@ function refreshIntel(m, p) {
 	for (const s of m.structs) {
 		if (s.owner === null || s.owner === p || s.hp <= 0 || s.kind === "mine") continue;
 		if (!sense(s.x, s.y)) continue;
+		const clear = !!(cov.identified[s.y]?.[s.x]);
 		const prev = tracked.get(s.id);
 		tracked.set(s.id, {
 			id: s.id,
 			domain: "ground",
-			kind: prev?.kind,
+			kind: clear ? s.kind : prev?.kind,
+			place: "struct",
 			x: s.x,
 			y: s.y
 		});
@@ -318,10 +336,38 @@ function doSell(m) {
 	resetAbandonedCaps(m);
 	refreshIntel(m, m.active);
 	logTo(m, m.active, `Sold ${offer.name} for ${offer.pay}.`);
+	checkWinner(m);
 	return true;
 }
 function checkWinner(m) {
 	if (m.winner) return;
+	if (m.mode === "capture") {
+		const points = m.structs.filter((s) => s.kind === "outpost" && s.hp > 0);
+		if (points.length && points.every((s) => s.owner === 0)) {
+			m.winner = { player: 0, reason: `${FACTIONS[0].name} holds every supply base.` };
+			return;
+		}
+		if (points.length && points.every((s) => s.owner === 1)) {
+			m.winner = { player: 1, reason: `${FACTIONS[1].name} holds every supply base.` };
+			return;
+		}
+		return;
+	}
+	if (m.mode === "raze") {
+		const razed = m.razed || [0, 0];
+		for (const p of [other(m.active), m.active]) {
+			if (!razed[p]) continue;
+			const left = m.structs.some((s) => s.owner === p && s.hp > 0 && s.kind !== "spire" && s.kind !== "mine");
+			if (left) continue;
+			const player = other(p);
+			m.winner = {
+				player,
+				reason: `${FACTIONS[player].name} razed every enemy building.`
+			};
+			return;
+		}
+		return;
+	}
 	for (const s of m.structs) if (s.kind === "spire" && s.hp <= 0 && s.owner !== null) {
 		const player = other(s.owner);
 		m.winner = {
@@ -334,7 +380,13 @@ function removeIfDead(m, now) {
 	m.units = m.units.filter((u) => u.hp > 0);
 	const kept = [];
 	for (const s of m.structs) if (s.hp > 0 || s.kind === "spire") kept.push(s);
-	else pushFx(m, s.x, s.y, "Down", now);
+	else {
+		if (s.owner !== null && s.kind !== "mine" && s.kind !== "spire") {
+			if (!m.razed) m.razed = [0, 0];
+			m.razed[s.owner] += 1;
+		}
+		pushFx(m, s.x, s.y, "Down", now);
+	}
 	m.structs = kept;
 	checkWinner(m);
 	const sel = m.selection;
@@ -354,14 +406,15 @@ function drAt(m, x, y, airTarget) {
 }
 function attackerFromUnit(u) {
 	const d = UNIT_BY[u.kind];
+	const plus = u.plus || {};
 	return {
 		name: d.name,
 		owner: u.owner,
 		x: u.x,
 		y: u.y,
 		hp: u.hp,
-		max: d.hp,
-		atk: d.atk,
+		max: d.hp + (plus.hp || 0),
+		atk: d.atk + (plus.atk || 0),
 		vs: d.vs,
 		minRange: d.minRange,
 		maxRange: d.maxRange,
@@ -501,6 +554,7 @@ function passable(m, unit, x, y, ending, eyes) {
 			if (!ending) return true;
 			if (st.kind === "spire" && st.owner !== null && st.owner !== unit.owner) return false;
 			if (st.owner === unit.owner || st.owner === null) return true;
+			if (st.kind === "outpost" && m.mode === "capture" && def.domain !== "air") return true;
 			return def.capture;
 		}
 		return false;
@@ -536,7 +590,7 @@ function pathOf(nodes, x, y, sx, sy) {
 	return path;
 }
 function marchLeft(unit) {
-	return Math.max(0, UNIT_BY[unit.kind].move - (unit.spent || 0));
+	return Math.max(0, UNIT_BY[unit.kind].move + (unit.plus?.move || 0) - (unit.spent || 0));
 }
 function moveMap(m, unit, eyes) {
 	const def = UNIT_BY[unit.kind];
@@ -657,6 +711,7 @@ function doPlace(m, x, y, now) {
 	}
 	if (isUnitKind(item)) {
 		const def = UNIT_BY[item];
+		const kit = kitFor(m, p, item);
 		m.funds[p] -= def.cost;
 		m.units.push({
 			id: uid(m, "u"),
@@ -664,7 +719,8 @@ function doPlace(m, x, y, now) {
 			owner: p,
 			x,
 			y,
-			hp: def.hp,
+			hp: kit.hp,
+			plus: kit.plus,
 			moved: false,
 			acted: false,
 			fresh: true,
@@ -742,7 +798,8 @@ function doMove(m, unit, x, y, now) {
 		removeIfDead(m, now);
 	} else {
 		const here = structAt(m, unit.x, unit.y);
-		const prize = here && (here.kind === "spire" || here.kind === "outpost") && here.owner !== unit.owner && def.capture;
+		const captor = def.capture || (m.mode === "capture" && def.domain !== "air");
+		const prize = here && here.kind === "outpost" && here.owner !== unit.owner && captor;
 		if (prize && !unit.acted) doCapture(m, unit, now);
 		else if (prize) logTo(m, unit.owner, `On the ${STRUCT_BY[here.kind].name}. Capture it next turn.`);
 		removeIfDead(m, now);
@@ -843,6 +900,10 @@ function strikeTile(m, a, x, y, now, force = false) {
 	const foes = m.units.filter((u) => u.hp > 0 && u.x === x && u.y === y && u.owner !== a.owner);
 	const st = foes.length ? undefined : structAt(m, x, y);
 	if (!foes.length && !st) return false;
+	if (!foes.length && st?.kind === "outpost" && m.mode === "capture") {
+		logTo(m, a.owner, "Move onto the supply base to capture it. Shooting does not take it.");
+		return false;
+	}
 	const primary = foes[0];
 	const air = primary ? UNIT_BY[primary.kind].domain === "air" : false;
 	const victimName = primary ? (foes.length > 1 ? `${foes.length} enemies` : UNIT_BY[primary.kind].name) : STRUCT_BY[st.kind].name;
@@ -871,6 +932,7 @@ function strikeTile(m, a, x, y, now, force = false) {
 		} else if (st) {
 			const dmg = Math.max(1, Math.round(damageOf(a.atk, a.vs.structure, a.hp, a.max, drAt(m, x, y, false)) * scale));
 			st.hp -= dmg;
+			if (st.kind === "spire" && m.mode === "raze" && st.hp < 1) st.hp = 1;
 			any = true;
 			logTo(m, a.owner, `${a.name} hits ${STRUCT_BY[st.kind].name} for ${dmg}.`);
 			if (st.owner !== null && st.owner !== a.owner) logTo(m, st.owner, `Your ${STRUCT_BY[st.kind].name} takes ${dmg} from a ${a.name}.`);
@@ -901,16 +963,20 @@ function strikeTile(m, a, x, y, now, force = false) {
 }
 function canCaptureNow(m, unit) {
 	if (unit.owner !== m.active || unit.acted || unit.eta || m.winner) return null;
-	if (!UNIT_BY[unit.kind].capture) return null;
 	const s = structAt(m, unit.x, unit.y);
-	if (!s || s.kind !== "outpost" && s.kind !== "spire") return null;
-	if (s.owner === unit.owner) return null;
+	if (!s || s.owner === unit.owner) return null;
+	if (m.mode === "capture" && s.kind === "outpost" && UNIT_BY[unit.kind].domain !== "air") return s;
+	if (!UNIT_BY[unit.kind].capture) return null;
+	if (s.kind !== "outpost" && s.kind !== "spire") return null;
+	if (m.mode === "capture") return null;
+	if (m.mode === "raze" && s.kind === "spire") return null;
 	return s;
 }
 function doCapture(m, unit, now) {
 	const s = canCaptureNow(m, unit);
 	if (!s) return false;
-	const power = Math.max(5, Math.round(10 * (unit.hp / UNIT_BY[unit.kind].hp)));
+	const maxHp = UNIT_BY[unit.kind].hp + (unit.plus?.hp || 0);
+	const power = Math.max(5, Math.round(10 * (unit.hp / maxHp)));
 	s.cap -= power;
 	unit.moved = true;
 	unit.acted = true;
@@ -927,6 +993,7 @@ function doCapture(m, unit, now) {
 		refreshIntel(m, m.active);
 		return true;
 	}
+	if (m.mode === "capture") s.cap = 0;
 	if (s.cap <= 0) {
 		const prev = s.owner;
 		s.owner = unit.owner;
@@ -934,7 +1001,11 @@ function doCapture(m, unit, now) {
 		s.hp = Math.min(STRUCT_BY.outpost.hp, s.hp + 4);
 		logTo(m, unit.owner, `${label} captured.`);
 		if (prev !== null) logTo(m, prev, `Your ${label} was captured.`);
+		const points = m.structs.filter((item) => item.kind === "outpost" && item.hp > 0);
+		const held = points.filter((item) => item.owner === unit.owner).length;
+		if (points.length) logTo(m, unit.owner, `Supply bases ${held} / ${points.length}.`);
 		pushFx(m, s.x, s.y, "Captured", now);
+		checkWinner(m);
 	} else {
 		logTo(m, unit.owner, `${label} capture ${20 - s.cap} / 20.`);
 		pushFx(m, s.x, s.y, "Holding", now);
@@ -991,7 +1062,7 @@ function doRepair(m, unit, now, onlyId) {
 		if (ally.id === unit.id || ally.owner !== unit.owner) continue;
 		if (onlyId && ally.id !== onlyId) continue;
 		if (Math.max(Math.abs(ally.x - unit.x), Math.abs(ally.y - unit.y)) > 2) continue;
-		const max = UNIT_BY[ally.kind].hp;
+		const max = UNIT_BY[ally.kind].hp + (ally.plus?.hp || 0);
 		if (ally.hp >= max) continue;
 		ally.hp = Math.min(max, ally.hp + def.repair);
 		n += 1;
@@ -1044,6 +1115,17 @@ function autofire(m, now) {
 	}
 	return lines;
 }
+function kitFor(m, owner, kind) {
+	const plus = unitBonus(m.crew?.[owner] || "", kind);
+	if (!plus.atk && !plus.move && !plus.hp) return {
+		hp: UNIT_BY[kind].hp,
+		plus: void 0
+	};
+	return {
+		hp: UNIT_BY[kind].hp + plus.hp,
+		plus
+	};
+}
 function placeStarter(m, p, sx, sy, tx, ty) {
 	const dx = Math.sign(sx - tx);
 	const dy = Math.sign(sy - ty);
@@ -1063,14 +1145,15 @@ function placeStarter(m, p, sx, sy, tx, ty) {
 		const y = sy + oy;
 		if (!inBounds(m, x, y) || unitAt(m, x, y) || structAt(m, x, y)) continue;
 		if (!groundTerrain(m.terrain[y][x])) continue;
-		const def = UNIT_BY.squad;
+		const kit = kitFor(m, p, "squad");
 		m.units.push({
 			id: uid(m, "u"),
 			kind: "squad",
 			owner: p,
 			x,
 			y,
-			hp: def.hp,
+			hp: kit.hp,
+			plus: kit.plus,
 			moved: false,
 			acted: false,
 			fresh: false,
@@ -1094,7 +1177,7 @@ function newMatch(mapId, bot, hqHp, mode, mods) {
 		turn: 1,
 		active: 0,
 		phase: "deploy",
-		funds: level ? [1e3, botPurse(level)] : [...OPENING_PURSE],
+		funds: level ? [OPENING_PURSE[0], botPurse(level)] : [...OPENING_PURSE],
 		terrain,
 		units: [],
 		structs: [],
@@ -1159,7 +1242,7 @@ function newMatch(mapId, bot, hqHp, mode, mods) {
 	m.funds[0] += inc;
 	logTo(m, 0, `Opening income +${inc}. ${incomeBits(m, 0)}.`);
 	logTo(m, 0, "Pick a catalog card. Gold + squares are the only places it can go.");
-	logTo(m, 1, "You are seated second. Your purse includes a 300 stipend. Income arrives on your turn.");
+	logTo(m, 1, "You are seated second. Income arrives on your turn.");
 	refreshIntel(m, 0);
 	refreshIntel(m, 1);
 	m.cursor = {
@@ -1255,7 +1338,7 @@ function botRank(bot) {
 	return n >= 1 && n <= 10 ? n : 0;
 }
 function botPurse(rank) {
-	return Math.min(1e3, 400 + rank * 60);
+	return Math.min(10000, 4000 + rank * 600);
 }
 function botLevel(m) {
 	return botRank(m.bot);
@@ -1462,7 +1545,11 @@ function apply(state, cmd) {
 			match: null
 		};
 		case "discard-save":
-			if (typeof localStorage !== "undefined") localStorage.removeItem(SAVE_KEY);
+			try {
+				disk()?.removeItem(SAVE_KEY);
+			} catch {
+				/* ignore */
+			}
 			return {
 				...emptyRoot(),
 				hasSave: false
@@ -1724,6 +1811,10 @@ function apply(state, cmd) {
 			}
 			const selU = selectedUnit(m);
 			if (selU && selU.owner === m.active) {
+				if (x === selU.x && y === selU.y && canCaptureNow(m, selU)) {
+					doCapture(m, selU, now);
+					return m;
+				}
 				if (UNIT_BY[selU.kind].repair > 0 && !selU.acted && !(selU.eta > 0)) {
 					const patient = unitAt(m, x, y);
 					if (patient && patient.id !== selU.id && patient.owner === m.active) {
@@ -1750,7 +1841,8 @@ function apply(state, cmd) {
 				const isMove = !!dest && passable(m, selU, x, y, true) && !(x === selU.x && y === selU.y);
 				if (isMove && isAtk) {
 					const st = structAt(m, x, y);
-					if (st && (st.kind === "outpost" || st.kind === "spire") && UNIT_BY[selU.kind].capture) doMove(m, selU, x, y, now);
+					const takePoint = st && st.kind === "outpost" && (m.mode === "capture" && UNIT_BY[selU.kind].domain !== "air" || UNIT_BY[selU.kind].capture);
+					if (takePoint) doMove(m, selU, x, y, now);
 					else openFire(m, attackerFromUnit(selU), x, y, now);
 					return m;
 				}
@@ -1998,7 +2090,8 @@ function restockOffer(m) {
 	if (left >= max) return null;
 	const near = m.structs.some((s) => s.hp > 0 && (s.kind === "spire" || s.kind === "outpost") && s.owner === u.owner && Math.max(Math.abs(s.x - u.x), Math.abs(s.y - u.y)) <= 1);
 	if (!near) return null;
-	const pay = Math.max(40, Math.round(def.cost * 0.35));
+	const missing = max - left;
+	const pay = 70 * missing;
 	if (m.funds[u.owner] < pay) return null;
 	return { pay, left, max };
 }

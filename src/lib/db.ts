@@ -49,6 +49,7 @@ const globalRef = globalThis as typeof globalThis & {
   __pgliteInstance__?: Promise<import("@electric-sql/pglite").PGlite>;
   __pgliteMigrateChain__?: Promise<void>;
   __pgliteDead__?: boolean;
+  __pgliteBound__?: string;
 };
 
 /**
@@ -63,6 +64,7 @@ const globalRef = globalThis as typeof globalThis & {
  *   interval                     -> Postgres interval text
  * numeric already comes back as a string on both (arbitrary precision).
  */
+const PGLITE_DIR = "/workspace/.data/ashveil-pglite";
 const OID_INT8 = 20;
 const OID_DATE = 1082;
 const OID_INTERVAL = 1186;
@@ -108,12 +110,11 @@ function createNeonSql(): Promise<Sql> {
 
 async function createPgliteSql(): Promise<Sql> {
   // Embedded Postgres, imported on demand so it never loads on the Neon path.
-  // One in-memory instance per process, shared across HMR module instances, so
-  // data survives source edits (it resets on dev-server restart).
+  // One instance per process, shared across HMR, so data survives source edits.
   globalRef.__pgliteInstance__ ??= (async () => {
     const { mkdirSync } = await import("node:fs");
     const { PGlite } = await import("@electric-sql/pglite");
-    const dataDir = "/workspace/.data/ashveil-pglite";
+    const dataDir = PGLITE_DIR;
     mkdirSync(dataDir, { recursive: true });
     const pg = new PGlite(dataDir, {
       parsers: {
@@ -173,7 +174,14 @@ async function createPgliteSql(): Promise<Sql> {
       const message = err instanceof Error ? err.message : "Database error";
       if (/aborted|closed|terminat/i.test(message)) {
         globalRef.__pgliteInstance__ = undefined;
+        globalRef.__pgliteMigrateChain__ = undefined;
         globalRef.__pgliteDead__ = true;
+        try {
+          void pg.close();
+        } catch {
+          /* the crashed database cannot be closed cleanly */
+        }
+        throw new Error("The account list restarted. Try again.");
       }
       throw new Error(message.slice(0, 180));
     }
@@ -200,6 +208,17 @@ async function createSql(): Promise<Sql> {
  * both backends — define tables there, never inline in server functions.
  */
 export function getSql(): Promise<Sql> {
+  // Always use the saved database. A leftover in-memory copy would show a
+  // different account list on this server than the one other devices already saved.
+  if (dbSource === "pglite" && globalRef.__pgliteBound__ !== PGLITE_DIR) {
+    const stale = globalRef.__pgliteInstance__;
+    globalRef.__pgliteBound__ = PGLITE_DIR;
+    globalRef.__pgliteInstance__ = undefined;
+    globalRef.__pgliteMigrateChain__ = undefined;
+    globalRef.__pgliteDead__ = false;
+    sqlPromise = null;
+    if (stale) void stale.then((pg) => pg.close()).catch(() => undefined);
+  }
   if (globalRef.__pgliteDead__) {
     globalRef.__pgliteDead__ = false;
     sqlPromise = null;
